@@ -189,6 +189,26 @@ class MetaBot(config: Config) extends Bot {
         reply("Failed to queue song (unknown error).")
     }
 
+  def showVetos(reply: String ⇒ Unit): Unit = {
+    (for {
+      songIds ← queueService.showVetos()
+      songInfos ← resolveSongNamesWithFallback(songIds)
+    } yield songInfos) andThen {
+      case Success(songInfos) ⇒
+        logger.debug(s"retrieved vetos: [$songInfos]")
+        songInfos match {
+          case Nil ⇒
+            reply("No songs vetoed.")
+          case songInfos @ _ ⇒
+            reply(s"Veto list:")
+            songInfos.zipWithIndex foreach { case (songInfo, index) ⇒ reply(s"${index + 1}: $songInfo") }
+        }
+      case Failure(e) ⇒
+        logger.error(s"failed to retrieve vetos: [$e]")
+        reply(s"Failed to retrieve vetos (unknown error).")
+    }
+  }
+
   def showQueue(nick: String)(reply: String ⇒ Unit): Unit =
     (for {
       userInfo ← resolveNick(nick)
@@ -305,6 +325,8 @@ class MetaBot(config: Config) extends Bot {
             } else {
               showGlobalQueue(replyFun)
             }
+          case "vetos" ⇒
+            showVetos(replyFun)
           case "show" ⇒
             if (!args.isEmpty) {
               showQueue(args(0))(replyFun)

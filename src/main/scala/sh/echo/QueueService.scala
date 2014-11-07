@@ -103,6 +103,15 @@ class QueueService(host: String, port: Int) {
     }
   }
 
+  def showVetos(): Future[List[String]] = {
+    import DefaultJsonProtocol._
+    val pipeline: HttpRequest ⇒ Future[List[String]] = (
+      sendReceive
+      ~> unmarshal[List[String]]
+    )
+    pipeline(Get(s"http://$host:$port/vetos"))
+  }
+
   def showQueue(userId: String): Future[List[String]] = {
     import DefaultJsonProtocol._
     val pipeline: HttpRequest ⇒ Future[List[String]] = (
@@ -128,4 +137,3 @@ class QueueService(host: String, port: Int) {
     pipeline(Get(s"http://$host:$port/queue/last-pop")) map (_.data)
   }
 }
-
