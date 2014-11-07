@@ -37,6 +37,9 @@ object QueueService {
   case class QueueRequestRejected(userId: String, songId: String)
     extends Exception(s"Could not queue '$songId' for '$userId'.")
 
+  case class VetoRequestRejected(userId: String, songId: String)
+    extends Exception(s"Could not veto '$songId' for '$userId'.")
+
   object Queue {
     import JsonProtocol._
 
@@ -100,6 +103,17 @@ class QueueService(host: String, port: Int) {
     pipeline(Post(s"http://$host:$port/users/$userId/queue", HttpEntity(`application/json`, Song(songId).toJson.prettyPrint))) map {
       case StatusCodes.Created ⇒ ()
       case _                   ⇒ throw QueueRequestRejected(userId, songId)
+    }
+  }
+
+  def veto(userId: String, songId: String): Future[Unit] = {
+    val pipeline: HttpRequest ⇒ Future[StatusCode] = (
+      sendReceive
+      ~> ((_: HttpResponse).status)
+    )
+    pipeline(Post(s"http://$host:$port/users/$userId/veto", HttpEntity(`application/json`, Song(songId).toJson.prettyPrint))) map {
+      case StatusCodes.Created ⇒ ()
+      case _                   ⇒ throw VetoRequestRejected(userId, songId)
     }
   }
 

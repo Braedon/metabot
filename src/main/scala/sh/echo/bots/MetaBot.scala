@@ -189,6 +189,34 @@ class MetaBot(config: Config) extends Bot {
         reply("Failed to queue song (unknown error).")
     }
 
+
+  def veto(nick: String)(reply: String ⇒ Unit): Unit = {
+    (for {
+      songId ← queueService.lastPopped()
+      if !songId.isEmpty
+      userInfo ← resolveNick(nick)
+      requestSongId = parseRequestSongId(nick, songId.get)
+      songInfo ← resolveSongName(requestSongId)
+      _ ← queueService.veto(userInfo.id, requestSongId)
+    } yield songInfo) andThen {
+      case Success(songInfo) ⇒
+        logger.debug(s"vetoed song [$songInfo]")
+        reply(s"Vetoed song $songInfo for $nick.")
+      case Failure(QueueService.VetoRequestRejected(userId, songId)) ⇒
+        logger.debug(s"could not veto song [$songId] for user [$userId]")
+        reply(s"Could not veto song for $nick.")
+      case Failure(MissingSongInfo(songId)) ⇒
+        logger.debug(s"tried to veto bad song id [$songId]")
+        reply(s"Could not veto invalid song or veto id $songId.")
+      case Failure(MissingUserInfo(nick)) ⇒
+        logger.debug(s"couldn't resolve [$nick] to id for vetoing")
+        reply("Please register first (!register).")
+      case Failure(e) ⇒
+        logger.error(s"failed to veto song for [$nick]: [$e]")
+        reply("Failed to veto song (unknown error).")
+    }
+  }
+
   def showVetos(reply: String ⇒ Unit): Unit = {
     (for {
       songIds ← queueService.showVetos()
@@ -325,6 +353,8 @@ class MetaBot(config: Config) extends Bot {
             } else {
               showGlobalQueue(replyFun)
             }
+          case "veto" ⇒
+            veto(nick)(replyFun)
           case "vetos" ⇒
             showVetos(replyFun)
           case "show" ⇒
