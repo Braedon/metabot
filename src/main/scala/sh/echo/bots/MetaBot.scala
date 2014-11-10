@@ -27,6 +27,7 @@ object MetaBot {
   case class MissingUserId(userId: String) extends Exception(s"Could not find nick for id '$userId'.")
   case class MissingUserInfo(nick: String) extends Exception(s"Could not find user info for '$nick'.")
   case class MissingSongInfo(songId: String) extends Exception(s"Could not resolve song info for '$songId'.")
+  case class InvalidResultIndex(resultIndex: String) extends Exception(s"'resultIndex' is not a valid search result index.")
 
   val CommandPrefix = "!"
   def parseCommand(text: String): Option[(String, Seq[String])] = {
@@ -110,8 +111,24 @@ class MetaBot(config: Config) extends Bot {
     gpmService.info(songId) map (_.toString) recover { case _ ⇒ throw MissingSongInfo(songId) }
 
   def search(nick: String, query: String)(reply: String ⇒ Unit): Unit = {
-    logger.debug(s"searching for [$query]")
+    logger.debug(s"searching songs for [$query]")
     gpmService.search(query) andThen {
+      case Success(results) ⇒
+        logger.debug(s"caching search results for [$query] by [$nick]: [$results]")
+        recentSearchResults = recentSearchResults.updated(nick, results)
+        results match {
+          case Nil         ⇒ reply("No results.")
+          case results @ _ ⇒ results.zipWithIndex foreach { case (result, index) ⇒ reply(s"${index + 1}: $result") }
+        }
+      case Failure(e) ⇒
+        logger.error(s"failed to search [$query]: [$e]")
+        reply(s"""Searching for "$query" failed (unknown reason).""")
+    }
+  }
+
+  def searchAlbums(nick: String, query: String)(reply: String ⇒ Unit): Unit = {
+    logger.debug(s"searching albums for [$query]")
+    gpmService.searchAlbum(query) andThen {
       case Success(results) ⇒
         logger.debug(s"caching search results for [$query] by [$nick]: [$results]")
         recentSearchResults = recentSearchResults.updated(nick, results)
@@ -158,34 +175,57 @@ class MetaBot(config: Config) extends Bot {
     }
   }
 
-  def parseRequestSongId(nick: String, songId: String): String =
+  def getSearchResult(nick: String, resultIndex: String): GpmService.SearchResult =
     (for {
-      index ← Try(songId.toInt).toOption
+      index ← Try(resultIndex.toInt).toOption
       recentSearchResults ← recentSearchResults.get(nick)
       searchResult ← recentSearchResults.drop(index - 1).headOption
-    } yield searchResult.id).getOrElse(songId)
+    } yield searchResult) match {
+      case Some(searchResult) ⇒ searchResult
+      case None ⇒ throw InvalidResultIndex(resultIndex)
+    }
 
-  def queue(nick: String, songId: String)(reply: String ⇒ Unit): Unit =
+  def queueSearchResult(userId: String, result: GpmService.SearchResult): Future[List[GpmService.SongSearchResult]] =
+    result match {
+      case song: GpmService.SongSearchResult ⇒ queueService.queue(userId, song.id) map {_ ⇒ List(song)}
+      case album: GpmService.AlbumSearchResult ⇒
+        gpmService.albumInfo(album.id) flatMap { albumInfo ⇒
+          albumInfo.tracks.foldLeft(Future.successful(List.empty[GpmService.SongSearchResult])) {
+            (previousFuture, song) ⇒
+              for {
+                previousResults ← previousFuture
+                _ ← queueService.queue(userId, song.id)
+              } yield previousResults :+ song
+          }
+        }
+    }
+
+  def queue(nick: String, resultIndex: String)(reply: String ⇒ Unit): Unit =
     (for {
       userInfo ← resolveNick(nick)
-      requestSongId = parseRequestSongId(nick, songId)
-      songInfo ← resolveSongName(requestSongId)
-      _ ← queueService.queue(userInfo.id, requestSongId)
-    } yield songInfo) andThen {
-      case Success(songInfo) ⇒
-        logger.debug(s"queued song [$songInfo]")
-        reply(s"Queued song $songInfo for $nick.")
+      result = getSearchResult(nick, resultIndex)
+      queuedSongs ← queueSearchResult(userInfo.id, result)
+    } yield queuedSongs) andThen {
+      case Success(queuedSongs) ⇒
+        logger.debug(s"queued songs [$queuedSongs]")
+        queuedSongs match {
+          case Nil         ⇒ reply(s"No songs queued for $nick.")
+          case songInfo :: Nil ⇒ reply(s"Queued song $songInfo for $nick.")
+          case songInfos @ _ ⇒
+            reply(s"Queued songs for $nick:")
+            songInfos.zipWithIndex foreach { case (songInfo, index) ⇒ reply(s"${index + 1}: $songInfo") }
+        }
       case Failure(QueueService.QueueRequestRejected(userId, songId)) ⇒
         logger.debug(s"could not queue song [$songId] for user [$userId]")
         reply(s"Could not queue song for $nick.")
-      case Failure(MissingSongInfo(songId)) ⇒
-        logger.debug(s"tried to queue bad song id [$songId]")
-        reply(s"Could not queue invalid song or queue id $songId.")
+      case Failure(InvalidResultIndex(resultIndex)) ⇒
+        logger.debug(s"could not find search result for index [$resultIndex]")
+        reply(s"'$resultIndex' is not a valid search result index.")
       case Failure(MissingUserInfo(nick)) ⇒
         logger.debug(s"couldn't resolve [$nick] to id for queuing")
         reply("Please register first (!register).")
       case Failure(e) ⇒
-        logger.error(s"failed to queue song [$songId] for [$nick]: [$e]")
+        logger.error(s"failed to queue result [$resultIndex] for [$nick]: [$e]")
         reply("Failed to queue song (unknown error).")
     }
 
@@ -292,6 +332,13 @@ class MetaBot(config: Config) extends Bot {
             val query = args.mkString(" ").trim
             if (!query.isEmpty) {
               search(nick, query)(replyFun)
+            } else {
+              replyFun("Please search for something.")
+            }
+          case "searchAlbums" ⇒
+            val query = args.mkString(" ").trim
+            if (!query.isEmpty) {
+              searchAlbums(nick, query)(replyFun)
             } else {
               replyFun("Please search for something.")
             }
